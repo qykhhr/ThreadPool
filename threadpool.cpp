@@ -29,7 +29,7 @@ void ThreadPool::setTaskQueMaxThreadHold(int threadHold)
 }
 
 // 给线程池提交任务 用户调用该接口，传入任务对象，生产任务
-void ThreadPool::submitTask(std::shared_ptr<Task> sp)
+Result ThreadPool::submitTask(std::shared_ptr<Task> sp)
 {
 	// 获取锁 
 	std::unique_lock<std::mutex> lock(taskQueMtx_);
@@ -45,7 +45,7 @@ void ThreadPool::submitTask(std::shared_ptr<Task> sp)
 		// 表示 _notFull 等待1s钟，条件依旧没有满足
 		std::cerr << "task queue is full, submit task fail." << std::endl;
 		// return task->getResult(); // 线程执行完task，task对象就被析构掉了
-		//return Result(sp,false);
+		return Result(sp,false);
 	}
 
 	// 如果有空余，把任务放入任务队列中
@@ -53,7 +53,7 @@ void ThreadPool::submitTask(std::shared_ptr<Task> sp)
 	taskSize_++;
 	// 因为新放了任务，任务队列肯定不为空了，在_notEmpty上进行通知
 	notEmpty_.notify_all();
-	//return Result(sp);
+	return Result(sp);
 }
 
 // 开启线程池
@@ -116,7 +116,9 @@ void ThreadPool::threadFunc()
 		// 当前线程负责执行这个任务
 		if (task != nullptr)
 		{
-			task->run();
+			//task->run(); 
+			//执行任务; 把任务的返回值setVal方法给到Result
+			task->exec();
 		}
 	}
 }
@@ -139,3 +141,71 @@ void Thread::start()
 	std::thread t(_func); // C++11来说 线程对象t 和 线程函数_func
 	t.detach(); // 设置分离线程  pthread_detach pthread_t 
 }
+
+///////////////////// Task方法实现 /////////////////////
+Task::Task()
+	: result_(nullptr)
+{
+
+}
+void Task::exec()
+{
+	if (result_ != nullptr)
+	{
+		result_->setVal(run()); //这里发生多态调用
+	}
+}
+void Task::setResult(Result* res)
+{
+	result_ = res;
+}
+
+///////////////////// Result方法实现 /////////////////////
+Result::Result(std::shared_ptr<Task> task, bool isValid)
+	: task_(task)
+	, isValid_(isValid)
+{
+	task_->setResult(this);
+}
+// 问题一: setVal方法，获取任务执行完的返回值的
+void Result::setVal(Any res)
+{
+	// 存储task的返回值
+	this->any_ = std::move(res);
+	sem_.post(); //已经获取的任务的返回值,增加信号量资源
+}
+// 问题二: get 方法，用户调用这个方法获取task的返回值
+Any Result::get() // 用户调用的
+{
+	if (!isValid_)
+	{
+		return "";
+	}
+	sem_.wait(); // task任务如果没有执行完,这里会阻塞用户线程
+	return std::move(any_);
+}
+
+///////////////////// Semaphore方法实现 /////////////////////
+
+Semaphore::Semaphore(int limit)
+	: resLimit_(limit)
+{
+
+}
+// 获取一个信号量资源
+void Semaphore::wait()
+{
+	std::unique_lock<std::mutex> lock(mtx_);
+	// 等待信号量有资源，没有资源的话，会阻塞当前线程
+	cond_.wait(lock, [&]() -> bool { return resLimit_ > 0; });
+	resLimit_--;
+}
+// 增加一个信号量资源
+void Semaphore::post()
+{
+	std::unique_lock<std::mutex> lock(mtx_);
+	resLimit_++;
+	cond_.notify_all();
+}
+
+
