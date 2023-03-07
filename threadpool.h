@@ -1,6 +1,7 @@
 #ifndef THREAD_POOL_H
 #define THREAD_POOL_H
 
+#include<thread>
 #include<vector>
 #include<queue>
 #include<memory>
@@ -9,20 +10,44 @@
 #include<condition_variable>
 #include<iostream>
 #include<functional>
-
-
 //信号量资源类 , 可以跨线程进行通信
 class Semaphore
 {
 public:
-	Semaphore(int limit = 0);
-	~Semaphore() = default;
+	Semaphore(int limit = 0)
+		: resLimit_(limit)
+		, isExit_(false)
+	{
+
+	}
+	~Semaphore()
+	{
+		isExit_ = true;
+	}
 
 	// 获取一个信号量资源
-	void wait();
+	void wait()
+	{
+		if (isExit_)
+			return;
+		std::unique_lock<std::mutex> lock(mtx_);
+		// 等待信号量有资源，没有资源的话，会阻塞当前线程
+		cond_.wait(lock, [&]() -> bool { return resLimit_ > 0; });
+		resLimit_--;
+	}
 	// 增加一个信号量资源
-	void post();
+	void post()
+	{
+		if (isExit_)
+			return;
+		std::unique_lock<std::mutex> lock(mtx_);
+		resLimit_++;
+		// linux下condition_variable的析构函数什么也不做
+		// 导致这里状态已经失效,无故阻塞
+		cond_.notify_all();
+	}
 private:
+	std::atomic_bool isExit_;
 	int resLimit_;
 	std::mutex mtx_;
 	std::condition_variable cond_;

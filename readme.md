@@ -138,3 +138,204 @@ git地址：git@gitee.com:xxx/xxx.git
 主要通过gdb attach到正在运行的进程，通过info threads，thread tid，bt等命令查看各个线程的调用
 堆栈信息，结合项目代码，定位到发生死锁的代码片段，分析死锁问题发生的原因，xxxx，以及最终的
 解决方案。  
+
+## linux平台编译线程池动态库
+
+### 生成动态库
+
+```cpp
+g++ -fPIC -shared threadpool.cpp -o libtdpool.so -std=c++17
+```
+
+### 移动到lib目录
+
+```cpp
+mv libtdpool.so /usr/local/lib/
+    
+mv threadpool.h /usr/local/include/
+```
+
+### 编程测试程序
+
+```cpp
+g++ main.cpp -o main -std=c++17 -ltdpool -lpthread
+```
+
+此时运行生成的文件还是有错误的.
+
+```
+[root@localhost threadpool]# ./main 
+./main: error while loading shared libraries: libtdpool.so: cannot open shared object file: No such file or directory
+```
+
+我们需要配置链接的路径
+
+```
+cd /etc/ld.so.conf.d/
+vim mylib.conf
+/usr/local/lib
+```
+
+刷新链接路径到 `/etc/ld.so.cache` 中
+
+```
+ldconfig
+```
+
+
+
+
+
+## linux下debug
+
+### 查看当前用户下运行的进程
+
+```
+ps -u
+```
+
+```
+[root@localhost ~]# ps -u
+USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root       724  0.0  0.0 110204   860 tty1     Ss+  23:06   0:00 /sbin/agetty --noclear tty1 linux
+root      1514  0.0  0.0 115676  2068 pts/0    Ss   23:07   0:00 -bash
+root      1515  0.0  0.0 115676  2264 pts/1    Ss   23:07   0:00 -bash
+root      1670  2.3  0.0 386676  1644 pts/1    Sl+  23:23   0:00 ./main
+root      1677  0.0  0.0 155456  1876 pts/0    R+   23:23   0:00 ps -u
+```
+
+### 调试一个正在运行的进程
+
+```
+gdb attach pid
+```
+
+### 显示当前进程正在运行的线程
+
+```
+info threads
+```
+
+![image-20230307232531583](readme.assets/image-20230307232531583.png)
+
+### 显示线程堆栈
+
+```
+bt
+```
+
+```
+(gdb) bt
+#0  0x00007fbab5156a35 in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+#1  0x00007fbab4e3a5cc in __gthread_cond_wait (__mutex=<optimized out>, __cond=<optimized out>) at /home/sylar/soft/gcc-9.1.0/build/x86_64-pc-linux-gnu/libstdc++-v3/include/x86_64-pc-linux-gnu/bits/gthr-default.h:865
+#2  std::condition_variable::wait (this=<optimized out>, __lock=...) at ../../../../../libstdc++-v3/src/c++11/condition_variable.cc:53
+#3  0x00007fbab5385b80 in void std::condition_variable::wait<ThreadPool::~ThreadPool()::{lambda()#1}>(std::unique_lock<std::mutex>&, ThreadPool::~ThreadPool()::{lambda()#1}) () from /usr/local/lib/libtdpool.so
+#4  0x00007fbab5384b6f in ThreadPool::~ThreadPool() () from /usr/local/lib/libtdpool.so
+#5  0x0000000000402cf1 in main ()
+```
+
+### 切换线程
+
+```
+thread 2
+```
+
+```
+(gdb) thread 2
+[Switching to thread 2 (Thread 0x7fbab2c86700 (LWP 1674))]
+#0  0x00007fbab515954d in __lll_lock_wait () from /lib64/libpthread.so.0
+(gdb) bt
+#0  0x00007fbab515954d in __lll_lock_wait () from /lib64/libpthread.so.0
+#1  0x00007fbab5157240 in pthread_cond_broadcast@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+#2  0x00007fbab4e3a609 in __gthread_cond_broadcast (__cond=<optimized out>) at /home/sylar/soft/gcc-9.1.0/build/x86_64-pc-linux-gnu/libstdc++-v3/include/x86_64-pc-linux-gnu/bits/gthr-default.h:853
+#3  std::condition_variable::notify_all (this=<optimized out>) at ../../../../../libstdc++-v3/src/c++11/condition_variable.cc:73
+#4  0x00007fbab5385b36 in Semaphore::post() () from /usr/local/lib/libtdpool.so
+#5  0x00007fbab53859d0 in Result::setVal(Any) () from /usr/local/lib/libtdpool.so
+#6  0x00007fbab5385877 in Task::exec() () from /usr/local/lib/libtdpool.so
+#7  0x00007fbab538568f in ThreadPool::threadFunc(int) () from /usr/local/lib/libtdpool.so
+......
+```
+
+
+
+### 原因
+
+Result也是一个局部对象,出作用域后析构, 私有属性Semaphore也会析构, Semaphore的析构函数默认销毁私有属性 condition_variable , 在 windows 上condition_variable 析构默认会释放资源,调用它 notify_all() 什么都不做, 也不会阻塞. Linux下 condition_variable 析构后, 调用 notify_all 会阻塞. 
+
+```cpp
+int main()
+{
+	{
+		ThreadPool pool;
+		pool.setMode(ThreadPoolMode::MODE_CACHED);
+		pool.start(4);
+
+		Result res1 = pool.submitTask(std::make_shared<MyTask>(1, 100000000));
+		Result res2 = pool.submitTask(std::make_shared<MyTask>(100000001, 200000000));
+		Result res3 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
+		Result res4 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
+		Result res5 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
+		Result res6 = pool.submitTask(std::make_shared<MyTask>(200000001, 300000000));
+		 
+		ULong sum1 = res1.get().cast_<ULong>();
+		std::cout << sum1 << std::endl;
+	}
+}
+```
+
+
+
+#### MSVC 中的 condition_variable 析构函数
+
+```cpp
+~condition_variable() noexcept {
+    _Cnd_destroy_in_situ(_Mycnd());
+}
+```
+
+#### GCC中的 condition_variable 析构函数
+
+```cpp
+~condition_variable() noexcept;
+```
+
+
+
+```cpp
+//信号量资源类 , 可以跨线程进行通信
+class Semaphore
+{
+public:
+	Semaphore(int limit = 0)
+		: resLimit_(limit)
+	{
+
+	}
+	~Semaphore() = default;
+
+	// 获取一个信号量资源
+	void wait()
+	{
+		std::unique_lock<std::mutex> lock(mtx_);
+		// 等待信号量有资源，没有资源的话，会阻塞当前线程
+		cond_.wait(lock, [&]() -> bool { return resLimit_ > 0; });
+		resLimit_--;
+	}
+	// 增加一个信号量资源
+	void post()
+	{
+		std::unique_lock<std::mutex> lock(mtx_);
+		resLimit_++;
+		// linux下condition_variable的析构函数什么也不做
+		// 导致这里状态已经失效,无故阻塞
+		cond_.notify_all();
+	}
+private:
+	int resLimit_;
+	std::mutex mtx_;
+	std::condition_variable cond_;
+};
+```
+
+
+
