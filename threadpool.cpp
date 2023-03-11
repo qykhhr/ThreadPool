@@ -1,8 +1,8 @@
 #include "threadpool.h"
 #include<iostream>
 
-const int TASK_MAX_THREADHOLD = INT32_MAX;
-const int THREAD_MAX_THRESHOLD = 1024;//线程创建阈值
+const int TASK_MAX_THREADHOLD = INT32_MAX;//队列上限阈值
+const int THREAD_MAX_THRESHOLD = 1024;//线程上限阈值
 const int THREAD_MAX_IDLE_TIME = 60; //线程空闲时间,单位:秒
 
 // 线程池构造

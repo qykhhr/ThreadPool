@@ -139,6 +139,104 @@ git地址：git@gitee.com:xxx/xxx.git
 堆栈信息，结合项目代码，定位到发生死锁的代码片段，分析死锁问题发生的原因，xxxx，以及最终的
 解决方案。  
 
+
+
+## C++定义一个可以接受任意类型的类, 可以在虚函数使用
+
+定义一个模板类就可以接受任意类型, 但是虚函数和模板是不能一起使用的.
+
+```cpp
+template<typename A>
+void Func(const A& a) {
+    std::cout <<"Func(const A& a) : "<< a << std::endl;
+}
+```
+
+编译器在编译期间，会检查代码中哪些地方使用了这个函数，例如，如果在整个程序中使用到了两种类型：`Func<int>(9)`; `Func<float>(9.3); ` 编译器会生成两份函数的二进制代码：void Func(const int& a),以及void Func(const float& a)。
+
+由于对于类的虚函数来说，其是否被调用是在程序运行的时候才知道，因此编译阶段不知道需要生成几份函数。    例如，基类是Base，有两个子类A和B, 代码中使用基类的指针来调用子类的虚函数 ，在编译阶段并不能知道调用的是哪个子类的虚函数，因此，编译器不知道类A和B中的模板函数被调用的情况，因此，不知道需要生成几份函数。
+
+**每个含有虚函数的类中都有一个虚函数表，该虚函数表存储着该类的所有的虚函数的地址，因此，虚函数为模板函数时，该表的大小是不知道的，因此编译器禁止！  虚函数为模板函数的情况下，编译阶段不能确定类的虚函数表的大小原因：下文有提到"However, the number of instantiations of a member function template is not fixed until the entire program has been translated". 例如，一般一个类定义在一个单独的文件中，编译器编译这个文件时并不知道其他文件对该类的virtual func的调用情况，所以无法确定模板虚函数的实例化个数！**
+
+我们可以使用 OOP 中继承的思想来实现: Any类中定义两个类, 组成一个继承关系, 子类使用模板来接受任意类型参数, 我们就可以在Any类中定义一个基类的智能指针, 进而可以获取子类的任意数据, 如果仅仅使用一个子类, 那么在定义 `std::unique_ptr<Derive<T>> val_;` 就会出现错误因为没有 T 类型.
+
+所以我们的做法就是定义一个Any类, Any类中声明两个类, 两个类是继承关系, 子类使用模板, 可以接受任意类型数据, Any类成员是一个智能指针并指向基类, 我们就可以通过基类来构造或访问子类的任意类型数据.
+
+```cpp
+//Any类型: 可以接受任意数据的类型
+class Any
+{
+public:
+	Any() = default;
+	~Any() = default;
+
+	Any(const Any&) = delete;
+	Any& operator=(Any&) = delete;
+
+	Any(Any&&) = default;
+	Any& operator=(Any&&) = default;
+
+	//这个构造函数可以让Any类型接受任意其他类型的数据
+	template<typename T>
+	Any(T data)
+		: base_(std::make_unique<Derive<T>>(data))
+	{
+
+	}
+
+	//这个方法能把Any对象里面存储的data数据提取出来
+	template<typename T>
+	T cast_()
+	{
+		//
+		Derive<T>* pd = dynamic_cast<Derive<T>*>(base_.get());
+		if (pd == nullptr)
+		{
+			throw "type id unmatch!";
+		}
+		return pd->data_;
+	}
+private:
+	//基类类型
+	class Base
+	{
+	public:
+		virtual ~Base() = default;
+	};
+	//派生类类型
+	template<typename T>
+	class Derive : public Base
+	{
+	public:
+		Derive(T data) : data_(data)
+		{
+
+		}
+	public:
+		T data_;
+	};
+private:
+	// 定义一个基类指针 
+	std::unique_ptr<Base> base_; //如果没有基类,定义std::unique_ptr<Derive> base_;会出现错误,因为Derive需要一个T类型
+};
+```
+
+### 测试
+
+```cpp
+int main()
+{
+	/*Any a("threadpoll hello");
+	std::cout << a.cast_<std::string>() << std::endl;*/
+	Any a(123);
+	std::cout << a.cast_<int>() << std::endl;
+	Any b(std::string("123"));
+	std::cout << b.cast_<std::string>() << std::endl;
+}
+```
+
+
+
 ## linux平台编译线程池动态库
 
 ### 生成动态库
